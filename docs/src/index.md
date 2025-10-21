@@ -1,7 +1,7 @@
-# Example
+# PicoHTTPParser
 
-Example Julia package repo.
+PicoHTTPParser Julia package repo.
 
 ```@autodocs
-Modules = [Example]
+Modules = [PicoHTTPParser]
 ```

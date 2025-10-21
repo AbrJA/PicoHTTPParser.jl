@@ -1,12 +1,12 @@
-using Documenter, Example
+using Documenter, PicoHTTPParser
 
-makedocs(modules = [Example],
-         sitename = "Example.jl",
+makedocs(modules = [PicoHTTPParser],
+         sitename = "PicoHTTPParser.jl",
          format = Documenter.HTML()
          )
 
 deploydocs(
-    repo = "github.com/JuliaLang/Example.jl.git",
+    repo = "github.com/AbrJA/PicoHTTPParser.jl.git",
     target = "build",
     deps   = nothing,
     make   = nothing,
