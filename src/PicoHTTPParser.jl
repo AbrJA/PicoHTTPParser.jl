@@ -51,7 +51,7 @@ function parse_request(req::Union{AbstractString, AbstractVector{<:UInt8}}; max_
     method = unsafe_string(method_ptr[], method_len[])
     path = unsafe_string(path_ptr[], path_len[])
     headers_dict = Dict{String,String}()
-    sizehint!(headers_dict, num_headers[])
+    sizehint!(headers_dict, Int(num_headers[]))
 
     for i in 1:num_headers[]
         h = headers[i]
@@ -119,6 +119,7 @@ function parse_response(resp::Union{AbstractString, AbstractVector{<:UInt8}}; ma
 
     reason = unsafe_string(msg_ptr[], msg_len[])
     headers_dict = Dict{String,String}()
+    sizehint!(headers_dict, Int(num_headers[]))
 
     for i in 1:num_headers[]
         h = headers[i]
