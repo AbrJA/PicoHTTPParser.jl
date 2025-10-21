@@ -1,4 +1,100 @@
-using Test, Example
+using Test
+using PicoHTTPParser
 
-@test hello("Julia") == "Hello, Julia"
-@test domath(2.0) ≈ 7.0
+@testset "PicoHTTPParser Tests" begin
+
+    # -------------------------------------------------
+    # 1. parse_request()
+    # -------------------------------------------------
+    @testset "parse_request" begin
+        req = """GET /index.html HTTP/1.1\r
+        Host: example.com\r
+        User-Agent: TestClient/1.0\r
+        Accept: */*\r
+        \r
+        """
+        parsed = parse_request(req)
+
+        @test parsed.method == "GET"
+        @test parsed.path == "/index.html"
+        @test parsed.minor_version == 1
+        @test parsed.headers["Host"] == "example.com"
+        @test parsed.headers["User-Agent"] == "TestClient/1.0"
+        @test parsed.headers["Accept"] == "*/*"
+
+        # Error case: incomplete request
+        bad_req = "GET / HTTP/1."
+        @test_throws ErrorException parse_request(bad_req)
+    end
+
+    # -------------------------------------------------
+    # 2. parse_response()
+    # -------------------------------------------------
+    @testset "parse_response" begin
+        resp = """HTTP/1.1 200 OK\r
+        Content-Type: text/plain\r
+        Content-Length: 5\r
+        \r
+        Hello"""
+        parsed = parse_response(resp)
+
+        @test parsed.status_code == 200
+        @test parsed.reason == "OK"
+        @test parsed.minor_version == 1
+        @test parsed.headers["Content-Type"] == "text/plain"
+        @test parsed.headers["Content-Length"] == "5"
+
+        # Error case
+        bad_resp = "HTTP/1.1"
+        @test_throws ErrorException parse_response(bad_resp)
+    end
+
+    # -------------------------------------------------
+    # 3. parse_headers()
+    # -------------------------------------------------
+    @testset "parse_headers" begin
+        headers_str = """Host: example.com\r
+        User-Agent: curl/7.68.0\r
+        \r
+        """
+        buf = Vector{UInt8}(headers_str)
+        result = parse_headers(buf)
+        @test result.ret > 0
+        parsed_names = [unsafe_string(h.name, h.name_len) for h in result.headers]
+        parsed_values = [unsafe_string(h.value, h.value_len) for h in result.headers]
+        @test "Host" in parsed_names
+        @test "User-Agent" in parsed_names
+        @test "example.com" in parsed_values
+    end
+
+    # -------------------------------------------------
+    # 4. decode_chunked!()
+    # -------------------------------------------------
+    @testset "decode_chunked!" begin
+        # Example chunked body:
+        # "4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n" => "Wikipedia"
+        data = Vector{UInt8}("4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n")
+        decoder = PhrChunkedDecoder()
+        ret, status, decoded = decode_chunked!(decoder, data)
+
+        @test ret >= 0
+        @test status == :done
+        @test String(decoded) == "Wikipedia"
+
+        # Incomplete chunk (need more data)
+        partial_data = Vector{UInt8}("4\r\nWi")
+        decoder2 = PhrChunkedDecoder()
+        ret2, status2, decoded2 = decode_chunked!(decoder2, partial_data)
+        @test status2 == :need_more
+    end
+
+    # -------------------------------------------------
+    # 5. Edge cases
+    # -------------------------------------------------
+    @testset "Edge cases" begin
+        # Empty input
+        @test_throws ErrorException parse_request("")
+        @test_throws ErrorException parse_response("")
+    end
+
+end
