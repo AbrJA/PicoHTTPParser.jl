@@ -3,13 +3,11 @@ using Documenter, PicoHTTPParser
 makedocs(modules = [PicoHTTPParser],
          sitename = "PicoHTTPParser.jl",
          authors = "Abraham Jaimes",
-         format = Documenter.HTML()
+         format = Documenter.HTML(),
+         repo = Remotes.GitHub("AbrJA", "PicoHTTPParser.jl")
          )
 
 deploydocs(
-    repo = "github.com/AbrJA/PicoHTTPParser.jl",
-    target = "build",
-    deps   = nothing,
-    make   = nothing,
+    repo = "AbrJA/PicoHTTPParser.jl",
     push_preview = true,
 )
