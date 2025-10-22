@@ -58,13 +58,10 @@ using PicoHTTPParser
         \r
         """
         buf = Vector{UInt8}(headers_str)
-        result = parse_headers(buf)
-        @test result.ret > 0
-        parsed_names = [unsafe_string(h.name, h.name_len) for h in result.headers]
-        parsed_values = [unsafe_string(h.value, h.value_len) for h in result.headers]
-        @test "Host" in parsed_names
-        @test "User-Agent" in parsed_names
-        @test "example.com" in parsed_values
+        parsed = parse_headers(buf)
+        @test parsed.ret > 0
+        @test parsed.headers["Host"] == "example.com"
+        @test parsed.headers["User-Agent"] == "curl/7.68.0"
     end
 
     # -------------------------------------------------

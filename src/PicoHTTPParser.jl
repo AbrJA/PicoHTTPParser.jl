@@ -50,7 +50,7 @@ function parse_request(req::Union{AbstractString, AbstractVector{<:UInt8}}; max_
 
     method = unsafe_string(method_ptr[], method_len[])
     path = unsafe_string(path_ptr[], path_len[])
-    headers_dict = Dict{String,String}()
+    headers_dict = Dict{String, String}()
     sizehint!(headers_dict, Int(num_headers[]))
 
     for i in 1:num_headers[]
@@ -81,7 +81,21 @@ function parse_headers(buf::AbstractVector{<:UInt8}, last_len::Integer = 0; max_
         pointer(buf), length(buf),
         pointer(headers), num_headers, last_len)
 
-    return (ret = ret, headers = headers[1:num_headers[]])
+    if ret < 0
+        error("Failed to parse HTTP headers (code = $ret)")
+    end
+
+    headers_dict = Dict{String, String}()
+    sizehint!(headers_dict, Int(num_headers[]))
+
+    for i in 1:num_headers[]
+        h = headers[i]
+        name = unsafe_string(h.name, h.name_len)
+        value = unsafe_string(h.value, h.value_len)
+        headers_dict[name] = value
+    end
+
+    return (ret = ret, headers = headers_dict)
 end
 
 """
@@ -118,7 +132,7 @@ function parse_response(resp::Union{AbstractString, AbstractVector{<:UInt8}}; ma
     end
 
     reason = unsafe_string(msg_ptr[], msg_len[])
-    headers_dict = Dict{String,String}()
+    headers_dict = Dict{String, String}()
     sizehint!(headers_dict, Int(num_headers[]))
 
     for i in 1:num_headers[]
@@ -128,10 +142,7 @@ function parse_response(resp::Union{AbstractString, AbstractVector{<:UInt8}}; ma
         headers_dict[name] = value
     end
 
-    return (status_code = status_code[],
-            reason = reason,
-            minor_version = minor_ver[],
-            headers = headers_dict)
+    return (status_code = status_code[], reason = reason, minor_version = minor_ver[], headers = headers_dict)
 end
 
 mutable struct PhrChunkedDecoder
@@ -139,9 +150,11 @@ mutable struct PhrChunkedDecoder
     consume_trailer::Cchar
     _hex_count::Cchar
     _state::Cchar
+    _total_read::UInt64
+    _total_overhead::UInt64
 
     function PhrChunkedDecoder(; consume_trailer::Bool = true)
-        return new(0, consume_trailer ? 1 : 0, 0, 0)
+        return new(0, consume_trailer ? 1 : 0, 0, 0, 0, 0)
     end
 end
 
@@ -154,16 +167,17 @@ end
         (ret, status, decoded_data)
 """
 function decode_chunked!(decoder::PhrChunkedDecoder, buf::AbstractVector{<:UInt8})
-    buflen = Ref{Csize_t}(length(buf))
+    # decoder_ref = Ref(decoder)
+    buf_len = Ref{Csize_t}(length(buf))
     ret = ccall((:phr_decode_chunked, libpicohttpparser), Cssize_t,
                 (Ref{PhrChunkedDecoder}, Ptr{Cchar}, Ref{Csize_t}),
-                decoder, pointer(buf), buflen)
+                Ref(decoder), pointer(buf), buf_len)
     if ret == -1
         return (-1, :error, UInt8[])
     elseif ret == -2
         return (-2, :need_more, UInt8[])
     else
-        decoded = buf[1:buflen[]]
+        decoded = buf[1:buf_len[]]
         status = (decoder.bytes_left_in_chunk == 0 && decoder.consume_trailer != 0) ? :done : :need_more
         return (Int(ret), status, decoded)
     end
