@@ -8,6 +8,6 @@ makedocs(modules = [PicoHTTPParser],
          )
 
 deploydocs(
-    repo = "AbrJA/PicoHTTPParser.jl",
+    repo = "github.com/AbrJA/PicoHTTPParser.jl",
     push_preview = true,
 )
