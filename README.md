@@ -116,6 +116,6 @@ result.done = true
 String(result.data) = "Wikipedia"
 ```
 
-## Contributing
+## ⚙️ Contributing
 
 Any contributions are welcome!
