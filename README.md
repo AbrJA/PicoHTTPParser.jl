@@ -6,13 +6,11 @@
 [![codecov](https://codecov.io/gh/AbrJA/PicoHTTPParser.jl/graph/badge.svg)](https://codecov.io/gh/AbrJA/PicoHTTPParser.jl)
 
 A minimal, high-performance Julia wrapper around the [picohttpparser](https://github.com/h2o/picohttpparser) C library.
-This package provides extremely fast HTTP request/response parsing and chunked transfer decoding through a clean Julia interface.
+This package provides extremely fast HTTP request/response/headers parsing and chunked transfer decoding through a clean Julia interface.
 
 ## 🚀 Features
 
 - Parse **HTTP requests**, **responses**, and **headers** efficiently
-- Supports **incremental header parsing**
-- Includes a **chunked transfer decoder**
 - Thin, zero-copy bindings to the C library via `ccall`
 - Built on top of [`PicoHTTPParser_jll`](https://github.com/JuliaBinaryWrappers/PicoHTTPParser_jll.jl)
 
@@ -62,7 +60,7 @@ message = """HTTP/1.1 200 OK\r
 Content-Type: text/plain\r
 Content-Length: 5\r
 \r
-Hello"""
+Hello""" |> Vector{UInt8}
 
 result = parse_response(message)
 
@@ -117,3 +115,7 @@ Output:
 result.done = true
 String(result.data) = "Wikipedia"
 ```
+
+## Contributing
+
+Any contributions are welcome!
