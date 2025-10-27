@@ -7,13 +7,13 @@ using PicoHTTPParser
     # 1. parse_request()
     # -------------------------------------------------
     @testset "parse_request" begin
-        req = """GET /index.html HTTP/1.1\r
+        message = """GET /index.html HTTP/1.1\r
         Host: example.com\r
         User-Agent: TestClient/1.0\r
         Accept: */*\r
         \r
         """
-        parsed = parse_request(req)
+        parsed = parse_request(message)
 
         @test parsed.method == "GET"
         @test parsed.path == "/index.html"
@@ -31,12 +31,12 @@ using PicoHTTPParser
     # 2. parse_response()
     # -------------------------------------------------
     @testset "parse_response" begin
-        resp = """HTTP/1.1 200 OK\r
+        message = """HTTP/1.1 200 OK\r
         Content-Type: text/plain\r
         Content-Length: 5\r
         \r
         Hello"""
-        parsed = parse_response(resp)
+        parsed = parse_response(message)
 
         @test parsed.status_code == 200
         @test parsed.reason == "OK"
@@ -53,15 +53,14 @@ using PicoHTTPParser
     # 3. parse_headers()
     # -------------------------------------------------
     @testset "parse_headers" begin
-        headers_str = """Host: example.com\r
+        message = """Host: example.com\r
         User-Agent: curl/7.68.0\r
         \r
         """
-        buf = Vector{UInt8}(headers_str)
-        parsed = parse_headers(buf)
-        @test parsed.ret > 0
-        @test parsed.headers["Host"] == "example.com"
-        @test parsed.headers["User-Agent"] == "curl/7.68.0"
+        parsed = parse_headers(message)
+
+        @test parsed["Host"] == "example.com"
+        @test parsed["User-Agent"] == "curl/7.68.0"
     end
 
     # -------------------------------------------------
@@ -71,18 +70,17 @@ using PicoHTTPParser
         # Example chunked body:
         # "4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n" => "Wikipedia"
         data = Vector{UInt8}("4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n")
-        decoder = PhrChunkedDecoder()
-        ret, status, decoded = decode_chunked!(decoder, data)
+        decoder = ChunkedDecoder()
+        decoded = decode_chunked!(decoder, data)
 
-        @test ret >= 0
-        @test status == :done
-        @test String(decoded) == "Wikipedia"
+        @test decoded.done == true
+        @test String(decoded.data) == "Wikipedia"
 
         # Incomplete chunk (need more data)
         partial_data = Vector{UInt8}("4\r\nWi")
-        decoder2 = PhrChunkedDecoder()
-        ret2, status2, decoded2 = decode_chunked!(decoder2, partial_data)
-        @test status2 == :need_more
+        decoder2 = ChunkedDecoder()
+        decoded2 = decode_chunked!(decoder2, partial_data)
+        @test decoded2.done == false
     end
 
     # -------------------------------------------------

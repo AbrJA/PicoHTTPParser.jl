@@ -3,40 +3,86 @@ module PicoHTTPParser
 
 using PicoHTTPParser_jll
 
-
 export parse_request, parse_response, parse_headers,
-       PhrChunkedDecoder, decode_chunked!
+       ChunkedDecoder, decode_chunked!
 
-struct PhrHeader
+abstract type HTTPMessage end
+
+"""
+    Request
+
+    A parsed HTTP request.
+"""
+struct Request <: HTTPMessage
+    method::String
+    path::String
+    minor_version::Int
+    headers::Dict{String, String}
+end
+
+"""
+    Response
+
+    A parsed HTTP response.
+"""
+struct Response <: HTTPMessage
+    status_code::Int
+    reason::String
+    minor_version::Int
+    headers::Dict{String, String}
+end
+
+struct Header
     name::Ptr{Cchar}
     name_len::Csize_t
     value::Ptr{Cchar}
     value_len::Csize_t
 end
 
+function _parse_headers_to_dict(headers::Vector{Header}, num_headers::Int)
+    headers_dict = Dict{String, String}()
+    sizehint!(headers_dict, num_headers)
+
+    for i in 1:num_headers
+        h = headers[i]
+        name = unsafe_string(h.name, h.name_len)
+        value = unsafe_string(h.value, h.value_len)
+        headers_dict[name] = value
+    end
+
+    return headers_dict
+end
+
 """
-    parse_request(req::AbstractString) -> NamedTuple
+    parse_request(message::Union{AbstractString, AbstractVector{<:UInt8}}; max_headers::Integer = 64) -> Request
 
     Parse an HTTP request string using picohttpparser.
 
     Returns:
-        (method, path, minor_version, headers::Dict)
+        Request
 """
-function parse_request(req::Union{AbstractString, AbstractVector{<:UInt8}}; max_headers::Integer = 64)
-    buf = req isa AbstractString ? codeunits(req) : req
+
+## WIP
+# import Base: parse
+# function Base.parse(::Type{T}, s::AbstractString; max_headers::Integer = 64) where {T<:HTTPMessage}
+#     return parse(T, codeunits(s); max_headers = max_headers)
+# end
+
+function parse_request(message::Union{AbstractString, AbstractVector{<:UInt8}}; max_headers::Integer = 64)
+    buf = message isa AbstractString ? codeunits(message) : message
 
     method_ptr, method_len = Ref{Ptr{Cchar}}(), Ref{Csize_t}()
     path_ptr, path_len = Ref{Ptr{Cchar}}(), Ref{Csize_t}()
     minor_ver = Ref{Cint}()
 
-    headers = Vector{PhrHeader}(undef, max_headers)
+    headers = Vector{Header}(undef, max_headers)
     num_headers = Ref{Csize_t}(max_headers)
 
     ret = ccall((:phr_parse_request, libpicohttpparser), Cint,
         (Ptr{Cchar}, Csize_t,
          Ref{Ptr{Cchar}}, Ref{Csize_t},
          Ref{Ptr{Cchar}}, Ref{Csize_t},
-         Ref{Cint}, Ptr{PhrHeader}, Ref{Csize_t}, Csize_t),
+         Ref{Cint}, Ptr{Header}, Ref{Csize_t}, Csize_t),
         pointer(buf), length(buf),
         method_ptr, method_len,
         path_ptr, path_len,
@@ -45,82 +91,66 @@ function parse_request(req::Union{AbstractString, AbstractVector{<:UInt8}}; max_
         0)
 
     if ret < 0
-        error("Failed to parse HTTP request (code = $ret)")
+        error("Failed to parse HTTP request (result = $ret)")
     end
 
     method = unsafe_string(method_ptr[], method_len[])
     path = unsafe_string(path_ptr[], path_len[])
-    headers_dict = Dict{String, String}()
-    sizehint!(headers_dict, Int(num_headers[]))
+    headers_dict = _parse_headers_to_dict(headers, Int(num_headers[]))
 
-    for i in 1:num_headers[]
-        h = headers[i]
-        name = unsafe_string(h.name, h.name_len)
-        value = unsafe_string(h.value, h.value_len)
-        headers_dict[name] = value
-    end
-
-    return (method = method, path = path, minor_version = minor_ver[], headers = headers_dict)
+    return Request(method, path, minor_ver[], headers_dict)
 end
 
 """
-    parse_headers(buf::Vector{UInt8}, last_len::Integer=0)
+    parse_headers(message::Union{AbstractString, AbstractVector{<:UInt8}}, last_len::Integer = 0; max_headers::Integer = 64) -> Dict{String, String}
 
     Incrementally parse headers (like phr_parse_headers).
 
     Returns:
-        (ret, headers)
+        Dict{String, String}
 """
-function parse_headers(buf::AbstractVector{<:UInt8}, last_len::Integer = 0; max_headers::Integer = 64)
-    headers = Vector{PhrHeader}(undef, max_headers)
+function parse_headers(message::Union{AbstractString, AbstractVector{<:UInt8}}, last_len::Integer = 0; max_headers::Integer = 64)
+    buf = message isa AbstractString ? codeunits(message) : message
+
+    headers = Vector{Header}(undef, max_headers)
     num_headers = Ref{Csize_t}(max_headers)
 
     ret = ccall((:phr_parse_headers, libpicohttpparser), Cint,
         (Ptr{Cchar}, Csize_t,
-         Ptr{PhrHeader}, Ref{Csize_t}, Csize_t),
+         Ptr{Header}, Ref{Csize_t}, Csize_t),
         pointer(buf), length(buf),
         pointer(headers), num_headers, last_len)
 
     if ret < 0
-        error("Failed to parse HTTP headers (code = $ret)")
+        error("Failed to parse HTTP headers (result = $ret)")
     end
 
-    headers_dict = Dict{String, String}()
-    sizehint!(headers_dict, Int(num_headers[]))
-
-    for i in 1:num_headers[]
-        h = headers[i]
-        name = unsafe_string(h.name, h.name_len)
-        value = unsafe_string(h.value, h.value_len)
-        headers_dict[name] = value
-    end
-
-    return (ret = ret, headers = headers_dict)
+    return _parse_headers_to_dict(headers, Int(num_headers[]))
 end
 
 """
-    parse_response(resp::AbstractString) -> NamedTuple
+    parse_response(message::Union{AbstractString, AbstractVector{<:UInt8}}; max_headers::Integer = 64)
 
     Parse an HTTP response string using picohttpparser.
 
     Returns:
-        (status_code, reason, minor_version, headers::Dict)
+        Response
 """
-function parse_response(resp::Union{AbstractString, AbstractVector{<:UInt8}}; max_headers::Integer = 64)
-    buf = resp isa AbstractString ? codeunits(resp) : resp
+function parse_response(message::Union{AbstractString, AbstractVector{<:UInt8}}; max_headers::Integer = 64)
+    buf = message isa AbstractString ? codeunits(message) : message
 
     minor_ver = Ref{Cint}()
     status_code = Ref{Cint}()
-    msg_ptr = Ref{Ptr{Cchar}}()
-    msg_len = Ref{Csize_t}()
-    headers = Vector{PhrHeader}(undef, max_headers)
+    msg_ptr, msg_len = Ref{Ptr{Cchar}}(), Ref{Csize_t}()
+
+    headers = Vector{Header}(undef, max_headers)
     num_headers = Ref{Csize_t}(max_headers)
 
     ret = ccall((:phr_parse_response, libpicohttpparser), Cint,
         (Ptr{Cchar}, Csize_t,
          Ref{Cint}, Ref{Cint},
          Ref{Ptr{Cchar}}, Ref{Csize_t},
-         Ptr{PhrHeader}, Ref{Csize_t}, Csize_t),
+         Ptr{Header}, Ref{Csize_t}, Csize_t),
         pointer(buf), length(buf),
         minor_ver, status_code,
         msg_ptr, msg_len,
@@ -128,24 +158,22 @@ function parse_response(resp::Union{AbstractString, AbstractVector{<:UInt8}}; ma
         0)
 
     if ret < 0
-        error("Failed to parse HTTP response (code = $ret)")
+        error("Failed to parse HTTP response (result = $ret)")
     end
 
     reason = unsafe_string(msg_ptr[], msg_len[])
-    headers_dict = Dict{String, String}()
-    sizehint!(headers_dict, Int(num_headers[]))
+    headers_dict = _parse_headers_to_dict(headers, Int(num_headers[]))
 
-    for i in 1:num_headers[]
-        h = headers[i]
-        name = unsafe_string(h.name, h.name_len)
-        value = unsafe_string(h.value, h.value_len)
-        headers_dict[name] = value
-    end
-
-    return (status_code = status_code[], reason = reason, minor_version = minor_ver[], headers = headers_dict)
+    return Response(status_code[], reason, minor_ver[], headers_dict)
 end
 
-mutable struct PhrChunkedDecoder
+"""
+    ChunkedDecoder(; consume_trailer::Bool = true)
+
+    Returns:
+        ChunkedDecoder
+"""
+mutable struct ChunkedDecoder
     bytes_left_in_chunk::Csize_t
     consume_trailer::Cchar
     _hex_count::Cchar
@@ -153,33 +181,40 @@ mutable struct PhrChunkedDecoder
     _total_read::UInt64
     _total_overhead::UInt64
 
-    function PhrChunkedDecoder(; consume_trailer::Bool = true)
+    function ChunkedDecoder(; consume_trailer::Bool = true)
         return new(0, consume_trailer ? 1 : 0, 0, 0, 0, 0)
     end
 end
 
+struct ChunkedResult
+    done::Bool
+    data::Vector{UInt8}
+end
+
 """
-    decode_chunked!(decoder::PhrChunkedDecoder, buf::Vector{UInt8}) -> (decoded::Vector{UInt8}, status::Symbol)
+    decode_chunked!(decoder::ChunkedDecoder, buf::Vector{UInt8}) -> ChunkedResult
 
     Feed a buffer of chunked-encoded data through picohttpparser's `phr_decode_chunked`.
 
     Returns:
-        (ret, status, decoded_data)
+        ChunkedResult
 """
-function decode_chunked!(decoder::PhrChunkedDecoder, buf::AbstractVector{<:UInt8})
-    # decoder_ref = Ref(decoder)
+function decode_chunked!(decoder::ChunkedDecoder, message::Union{AbstractString, AbstractVector{<:UInt8}})
+    buf = message isa AbstractString ? codeunits(message) : message
     buf_len = Ref{Csize_t}(length(buf))
+
     ret = ccall((:phr_decode_chunked, libpicohttpparser), Cssize_t,
-                (Ref{PhrChunkedDecoder}, Ptr{Cchar}, Ref{Csize_t}),
+                (Ref{ChunkedDecoder}, Ptr{Cchar}, Ref{Csize_t}),
                 Ref(decoder), pointer(buf), buf_len)
+
     if ret == -1
-        return (-1, :error, UInt8[])
+        error("Failed to decode chunked data (result = $ret)")
     elseif ret == -2
-        return (-2, :need_more, UInt8[])
+        return ChunkedResult(false, UInt8[])
     else
-        decoded = buf[1:buf_len[]]
-        status = (decoder.bytes_left_in_chunk == 0 && decoder.consume_trailer != 0) ? :done : :need_more
-        return (Int(ret), status, decoded)
+        data = buf[1:buf_len[]]
+        done = (decoder.bytes_left_in_chunk == 0 && decoder.consume_trailer != 0) ? true : false
+        return ChunkedResult(done, data)
     end
 end
 
