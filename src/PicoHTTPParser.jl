@@ -102,7 +102,7 @@ function parse_request(message::Union{AbstractString, AbstractVector{<:UInt8}}; 
 
     content_length = get(headers_dict, "Content-Length", "0")
     body_len = parse(Int, content_length)
-    # Use body_len > 0 case?
+    # Use body_len > 0 case or buf[(ret + 1):end]?
     body = buf[(ret + 1):(ret + body_len)]
 
     return Request(method, path, minor_ver[], headers_dict, body)

@@ -42,6 +42,7 @@ result = parse_request(message)
 @show result.path
 @show result.minor_version
 @show result.headers
+@show String(result.body)
 ```
 
 Output:
@@ -51,6 +52,7 @@ result.method = "GET"
 result.path = "/index.html"
 result.minor_version = 1
 result.headers = Dict("Host" => "example.com", "Accept" => "*/*", "User-Agent" => "TestClient/1.0")
+String(result.body) = ""
 ```
 
 ### Parse response
@@ -68,6 +70,7 @@ result = parse_response(message)
 @show result.minor_version
 @show result.headers
 @show result.reason
+@show String(result.body)
 ```
 
 Output:
@@ -77,6 +80,7 @@ result.status_code = 200
 result.minor_version = 1
 result.headers = Dict("Content-Length" => "5", "Content-Type" => "text/plain")
 result.reason = "OK"
+String(result.body) = "Hello"
 ```
 
 ### Parse headers
