@@ -18,6 +18,7 @@ struct Request <: HTTPMessage
     path::String
     minor_version::Int
     headers::Dict{String, String}
+    body::Vector{UInt8}
 end
 
 """
@@ -30,6 +31,7 @@ struct Response <: HTTPMessage
     reason::String
     minor_version::Int
     headers::Dict{String, String}
+    body::Vector{UInt8}
 end
 
 struct Header
@@ -98,7 +100,12 @@ function parse_request(message::Union{AbstractString, AbstractVector{<:UInt8}}; 
     path = unsafe_string(path_ptr[], path_len[])
     headers_dict = _parse_headers_to_dict(headers, Int(num_headers[]))
 
-    return Request(method, path, minor_ver[], headers_dict)
+    content_length = get(headers_dict, "Content-Length", "0")
+    body_len = parse(Int, content_length)
+    # Use body_len > 0 case?
+    body = buf[(ret + 1):(ret + body_len)]
+
+    return Request(method, path, minor_ver[], headers_dict, body)
 end
 
 """
@@ -164,7 +171,12 @@ function parse_response(message::Union{AbstractString, AbstractVector{<:UInt8}};
     reason = unsafe_string(msg_ptr[], msg_len[])
     headers_dict = _parse_headers_to_dict(headers, Int(num_headers[]))
 
-    return Response(status_code[], reason, minor_ver[], headers_dict)
+    content_length = get(headers_dict, "Content-Length", "0")
+    body_len = parse(Int, content_length)
+    # Use body_len > 0 case?
+    body = buf[(ret + 1):(ret + body_len)]
+
+    return Response(status_code[], reason, minor_ver[], headers_dict, body)
 end
 
 """
