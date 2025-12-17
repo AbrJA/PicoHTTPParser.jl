@@ -2,6 +2,7 @@
 
 [![](https://img.shields.io/badge/docs-dev-blue.svg)](https://AbrJA.github.io/PicoHTTPParser.jl/dev)
 [![Build Status](https://github.com/AbrJA/PicoHTTPParser.jl/actions/workflows/CI.yml/badge.svg?branch=master)](https://github.com/AbrJA/PicoHTTPParser.jl/actions/workflows/CI.yml?query=branch%3Amaster)
+
 A minimal, high-performance Julia wrapper around the [picohttpparser](https://github.com/h2o/picohttpparser) C library.
 This package provides extremely fast HTTP request/response/headers parsing and chunked transfer decoding through a clean Julia interface.
 
