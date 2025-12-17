@@ -2,8 +2,7 @@ module PicoHTTPParser
 
 using PicoHTTPParser_jll
 
-export parse_request, parse_response, parse_headers,
-    ChunkedDecoder, decode_chunked!
+export parse_request, parse_response, parse_headers, ChunkedDecoder, decode_chunked!
 
 abstract type HTTPMessage end
 
@@ -62,12 +61,6 @@ end
     Returns:
         Request
 """
-
-## WIP
-# import Base: parse
-# function Base.parse(::Type{T}, s::AbstractString; max_headers::Integer = 64) where {T<:HTTPMessage}
-#     return parse(T, codeunits(s); max_headers = max_headers)
-# end
 
 function parse_request(message::Union{AbstractString,AbstractVector{<:UInt8}}; max_headers::Integer=64)
     buf = message isa AbstractString ? codeunits(message) : message
