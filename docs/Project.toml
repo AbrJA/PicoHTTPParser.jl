@@ -1,5 +1,6 @@
 [deps]
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+PicoHTTPParser = "7dfb699f-0de3-4c94-bc59-7670dfa845e2"
 
 [compat]
 Documenter = "1"
