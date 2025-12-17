@@ -1,10 +1,9 @@
 module PicoHTTPParser
 
-
 using PicoHTTPParser_jll
 
 export parse_request, parse_response, parse_headers,
-       ChunkedDecoder, decode_chunked!
+    ChunkedDecoder, decode_chunked!
 
 abstract type HTTPMessage end
 
@@ -17,7 +16,7 @@ struct Request <: HTTPMessage
     method::String
     path::String
     minor_version::Int
-    headers::Dict{String, String}
+    headers::Dict{String,String}
     body::Vector{UInt8}
 end
 
@@ -30,7 +29,7 @@ struct Response <: HTTPMessage
     status_code::Int
     reason::String
     minor_version::Int
-    headers::Dict{String, String}
+    headers::Dict{String,String}
     body::Vector{UInt8}
 end
 
@@ -42,7 +41,7 @@ struct Header
 end
 
 function _parse_headers_to_dict(headers::Vector{Header}, num_headers::Int)
-    headers_dict = Dict{String, String}()
+    headers_dict = Dict{String,String}()
     sizehint!(headers_dict, num_headers)
 
     for i in 1:num_headers
@@ -70,7 +69,7 @@ end
 #     return parse(T, codeunits(s); max_headers = max_headers)
 # end
 
-function parse_request(message::Union{AbstractString, AbstractVector{<:UInt8}}; max_headers::Integer = 64)
+function parse_request(message::Union{AbstractString,AbstractVector{<:UInt8}}; max_headers::Integer=64)
     buf = message isa AbstractString ? codeunits(message) : message
 
     method_ptr, method_len = Ref{Ptr{Cchar}}(), Ref{Csize_t}()
@@ -82,9 +81,9 @@ function parse_request(message::Union{AbstractString, AbstractVector{<:UInt8}}; 
 
     ret = ccall((:phr_parse_request, libpicohttpparser), Cint,
         (Ptr{Cchar}, Csize_t,
-         Ref{Ptr{Cchar}}, Ref{Csize_t},
-         Ref{Ptr{Cchar}}, Ref{Csize_t},
-         Ref{Cint}, Ptr{Header}, Ref{Csize_t}, Csize_t),
+            Ref{Ptr{Cchar}}, Ref{Csize_t},
+            Ref{Ptr{Cchar}}, Ref{Csize_t},
+            Ref{Cint}, Ptr{Header}, Ref{Csize_t}, Csize_t),
         pointer(buf), length(buf),
         method_ptr, method_len,
         path_ptr, path_len,
@@ -103,7 +102,7 @@ function parse_request(message::Union{AbstractString, AbstractVector{<:UInt8}}; 
     content_length = get(headers_dict, "Content-Length", "0")
     body_len = parse(Int, content_length)
     # Use body_len > 0 case or buf[(ret + 1):end]?
-    body = buf[(ret + 1):(ret + body_len)]
+    body = buf[(ret+1):(ret+body_len)]
 
     return Request(method, path, minor_ver[], headers_dict, body)
 end
@@ -116,7 +115,7 @@ end
     Returns:
         Dict{String, String}
 """
-function parse_headers(message::Union{AbstractString, AbstractVector{<:UInt8}}, last_len::Integer = 0; max_headers::Integer = 64)
+function parse_headers(message::Union{AbstractString,AbstractVector{<:UInt8}}, last_len::Integer=0; max_headers::Integer=64)
     buf = message isa AbstractString ? codeunits(message) : message
 
     headers = Vector{Header}(undef, max_headers)
@@ -124,7 +123,7 @@ function parse_headers(message::Union{AbstractString, AbstractVector{<:UInt8}}, 
 
     ret = ccall((:phr_parse_headers, libpicohttpparser), Cint,
         (Ptr{Cchar}, Csize_t,
-         Ptr{Header}, Ref{Csize_t}, Csize_t),
+            Ptr{Header}, Ref{Csize_t}, Csize_t),
         pointer(buf), length(buf),
         pointer(headers), num_headers, last_len)
 
@@ -143,7 +142,7 @@ end
     Returns:
         Response
 """
-function parse_response(message::Union{AbstractString, AbstractVector{<:UInt8}}; max_headers::Integer = 64)
+function parse_response(message::Union{AbstractString,AbstractVector{<:UInt8}}; max_headers::Integer=64)
     buf = message isa AbstractString ? codeunits(message) : message
 
     minor_ver = Ref{Cint}()
@@ -155,9 +154,9 @@ function parse_response(message::Union{AbstractString, AbstractVector{<:UInt8}};
 
     ret = ccall((:phr_parse_response, libpicohttpparser), Cint,
         (Ptr{Cchar}, Csize_t,
-         Ref{Cint}, Ref{Cint},
-         Ref{Ptr{Cchar}}, Ref{Csize_t},
-         Ptr{Header}, Ref{Csize_t}, Csize_t),
+            Ref{Cint}, Ref{Cint},
+            Ref{Ptr{Cchar}}, Ref{Csize_t},
+            Ptr{Header}, Ref{Csize_t}, Csize_t),
         pointer(buf), length(buf),
         minor_ver, status_code,
         msg_ptr, msg_len,
@@ -174,7 +173,7 @@ function parse_response(message::Union{AbstractString, AbstractVector{<:UInt8}};
     content_length = get(headers_dict, "Content-Length", "0")
     body_len = parse(Int, content_length)
     # Use body_len > 0 case?
-    body = buf[(ret + 1):(ret + body_len)]
+    body = buf[(ret+1):(ret+body_len)]
 
     return Response(status_code[], reason, minor_ver[], headers_dict, body)
 end
@@ -193,7 +192,7 @@ mutable struct ChunkedDecoder
     _total_read::UInt64
     _total_overhead::UInt64
 
-    function ChunkedDecoder(; consume_trailer::Bool = true)
+    function ChunkedDecoder(; consume_trailer::Bool=true)
         return new(0, consume_trailer ? 1 : 0, 0, 0, 0, 0)
     end
 end
@@ -211,13 +210,13 @@ end
     Returns:
         ChunkedResult
 """
-function decode_chunked!(decoder::ChunkedDecoder, message::Union{AbstractString, AbstractVector{<:UInt8}})
+function decode_chunked!(decoder::ChunkedDecoder, message::Union{AbstractString,AbstractVector{<:UInt8}})
     buf = message isa AbstractString ? codeunits(message) : message
     buf_len = Ref{Csize_t}(length(buf))
 
     ret = ccall((:phr_decode_chunked, libpicohttpparser), Cssize_t,
-                (Ref{ChunkedDecoder}, Ptr{Cchar}, Ref{Csize_t}),
-                Ref(decoder), pointer(buf), buf_len)
+        (Ref{ChunkedDecoder}, Ptr{Cchar}, Ref{Csize_t}),
+        Ref(decoder), pointer(buf), buf_len)
 
     if ret == -1
         error("Failed to decode chunked data (result = $ret)")
