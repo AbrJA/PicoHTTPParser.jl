@@ -5,6 +5,7 @@ version = "0.1.0"
 
 [deps]
 PicoHTTPParser_jll = "c57283d8-6a1b-5748-ae95-e23eefbd933c"
+StringViews = "354b36f9-a18e-4713-926e-db85100087ba"
 
 [compat]
 julia = "1"
