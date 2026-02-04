@@ -1,7 +1,7 @@
 name = "PicoHTTPParser"
 uuid = "7dfb699f-0de3-4c94-bc59-7670dfa845e2"
 authors = ["AbrJA <abraham.jaimes.mx@gmail.com>"]
-version = "0.1.0"
+version = "0.2.0"
 
 [deps]
 PicoHTTPParser_jll = "c57283d8-6a1b-5748-ae95-e23eefbd933c"
