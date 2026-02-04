@@ -1,35 +1,37 @@
 module PicoHTTPParser
 
 using PicoHTTPParser_jll
+using StringViews
 
-export parse_request, parse_response, parse_headers, ChunkedDecoder, decode_chunked!
+export parse_request, parse_response, parse_headers, get_header, ChunkedDecoder, decode_chunked!
 
 abstract type HTTPMessage end
+
+const BufferView = StringView{SubArray{UInt8,1,Vector{UInt8},Tuple{UnitRange{Int}},true}}
 
 """
     Request
 
-    A parsed HTTP request.
+    A parsed HTTP request with zero-copy views into the original buffer.
+    The `Request` object KEEPS the original buffer alive.
 """
 struct Request <: HTTPMessage
-    method::String
-    path::String
+    method::BufferView
+    path::BufferView
     minor_version::Int
-    headers::Dict{String,String}
-    body::Vector{UInt8}
+    headers::Vector{Pair{BufferView,BufferView}}
+    body::SubArray{UInt8,1,Vector{UInt8},Tuple{UnitRange{Int}},true}
 end
 
 """
     Response
-
-    A parsed HTTP response.
 """
 struct Response <: HTTPMessage
     status_code::Int
-    reason::String
+    reason::BufferView
     minor_version::Int
-    headers::Dict{String,String}
-    body::Vector{UInt8}
+    headers::Vector{Pair{BufferView,BufferView}}
+    body::SubArray{UInt8,1,Vector{UInt8},Tuple{UnitRange{Int}},true}
 end
 
 struct Header
@@ -39,34 +41,52 @@ struct Header
     value_len::Csize_t
 end
 
-function _parse_headers_to_dict(headers::Vector{Header}, num_headers::Int)
-    headers_dict = Dict{String,String}()
-    sizehint!(headers_dict, num_headers)
-
-    for i in 1:num_headers
-        h = headers[i]
-        name = unsafe_string(h.name, h.name_len)
-        value = unsafe_string(h.value, h.value_len)
-        headers_dict[name] = value
+function _ptr_to_view(buf::Vector{UInt8}, ptr::Ptr{Cchar}, len::Csize_t)::BufferView
+    if ptr == C_NULL
+        if len > 0
+            error("Received NULL pointer with non-zero length")
+        end
+        return StringView(view(buf, 1:0))
     end
 
-    return headers_dict
+    GC.@preserve buf begin
+        base_addr = UInt(pointer(buf))
+        tgt_addr = UInt(ptr)
+        offset = tgt_addr - base_addr
+        start_idx = Int(offset) + 1
+        end_idx = start_idx + Int(len) - 1
+
+        if start_idx < 1 || end_idx > length(buf)
+            error("Pointer falls outside of buffer bounds")
+        end
+
+        return StringView(view(buf, start_idx:end_idx))
+    end
+end
+
+function _parse_headers_to_vec(headers_raw::Vector{Header}, num_headers::Int, buf::Vector{UInt8})
+    res = Vector{Pair{BufferView,BufferView}}(undef, num_headers)
+
+    @inbounds for i in 1:num_headers
+        h = headers_raw[i]
+        name = _ptr_to_view(buf, h.name, h.name_len)
+        value = _ptr_to_view(buf, h.value, h.value_len)
+        res[i] = Pair(name, value)
+    end
+    return res
 end
 
 """
-    parse_request(message::Union{AbstractString, AbstractVector{<:UInt8}}; max_headers::Integer = 64) -> Request
+    parse_request(buf::Vector{UInt8}, last_len::Integer=0; max_headers=64) -> Union{Request, Nothing}
 
-    Parse an HTTP request string using picohttpparser.
-
-    Returns:
-        Request
+    Zero-copy parse. Returns `nothing` if the request is incomplete (partial).
+    NOTE: Input must be `Vector{UInt8}`.
 """
-
-function parse_request(message::Union{AbstractString,AbstractVector{<:UInt8}}; max_headers::Integer=64)
-    buf = message isa AbstractString ? codeunits(message) : message
-
-    method_ptr, method_len = Ref{Ptr{Cchar}}(), Ref{Csize_t}()
-    path_ptr, path_len = Ref{Ptr{Cchar}}(), Ref{Csize_t}()
+function parse_request(buf::Vector{UInt8}, last_len::Integer=0; max_headers::Integer=64)
+    method_ptr = Ref{Ptr{Cchar}}()
+    method_len = Ref{Csize_t}()
+    path_ptr = Ref{Ptr{Cchar}}()
+    path_len = Ref{Csize_t}()
     minor_ver = Ref{Cint}()
 
     headers = Vector{Header}(undef, max_headers)
@@ -82,65 +102,91 @@ function parse_request(message::Union{AbstractString,AbstractVector{<:UInt8}}; m
         path_ptr, path_len,
         minor_ver,
         pointer(headers), num_headers,
-        0)
+        last_len)
 
-    if ret < 0
+    if ret == -2
+        return nothing # Partial
+    elseif ret < 0
         error("Failed to parse HTTP request (result = $ret)")
     end
 
-    method = unsafe_string(method_ptr[], method_len[])
-    path = unsafe_string(path_ptr[], path_len[])
-    headers_dict = _parse_headers_to_dict(headers, Int(num_headers[]))
+    method = _ptr_to_view(buf, method_ptr[], method_len[])
+    path = _ptr_to_view(buf, path_ptr[], path_len[])
+    headers_vec = _parse_headers_to_vec(headers, Int(num_headers[]), buf)
 
-    content_length = get(headers_dict, "Content-Length", "0")
-    body_len = parse(Int, content_length)
-    # Use body_len > 0 case or buf[(ret + 1):end]?
-    body = buf[(ret+1):(ret+body_len)]
+    # Manual lookup for Content-Length to avoid allocations
+    content_length = 0
+    for (k, v) in headers_vec
+        if length(k) == 14 && equals_insensitive(k, "content-length")
+            # We can parse the StringView directly
+            content_length = tryparse(Int, v)
+            if isnothing(content_length)
+                content_length = 0
+            end
+            break
+        end
+    end
 
-    return Request(method, path, minor_ver[], headers_dict, body)
+    body_start = ret + 1
+    body_end = ret + content_length
+
+    if length(buf) < body_end
+        return nothing # Body incomplete
+    end
+
+    body = view(buf, body_start:body_end)
+
+    return Request(method, path, Int(minor_ver[]), headers_vec, body)
+end
+
+function get_header(msg::HTTPMessage, key::AbstractString)
+    for (k, v) in msg.headers
+        if equals_insensitive(k, key)
+            return v
+        end
+    end
+    return nothing
+end
+
+function equals_insensitive(a::AbstractString, b::AbstractString)
+    return length(a) == length(b) && all(lowercase(c1) == lowercase(c2) for (c1, c2) in zip(a, b))
 end
 
 """
-    parse_headers(message::Union{AbstractString, AbstractVector{<:UInt8}}, last_len::Integer = 0; max_headers::Integer = 64) -> Dict{String, String}
+    parse_headers(buf::Vector{UInt8}, last_len::Integer=0; max_headers::Integer=64)
 
-    Incrementally parse headers (like phr_parse_headers).
-
-    Returns:
-        Dict{String, String}
+    Incrementally parse headers.
+    Returns `Vector{Pair{BufferView, BufferView}}` or `nothing` if partial.
 """
-function parse_headers(message::Union{AbstractString,AbstractVector{<:UInt8}}, last_len::Integer=0; max_headers::Integer=64)
-    buf = message isa AbstractString ? codeunits(message) : message
-
+function parse_headers(buf::Vector{UInt8}, last_len::Integer=0; max_headers::Integer=64)
     headers = Vector{Header}(undef, max_headers)
     num_headers = Ref{Csize_t}(max_headers)
 
-    ret = ccall((:phr_parse_headers, libpicohttpparser), Cint,
+    # SAFETY: We must preserve 'buf' so it isn't freed while C reads it
+    ret = GC.@preserve buf ccall((:phr_parse_headers, libpicohttpparser), Cint,
         (Ptr{Cchar}, Csize_t,
             Ptr{Header}, Ref{Csize_t}, Csize_t),
         pointer(buf), length(buf),
         pointer(headers), num_headers, last_len)
 
-    if ret < 0
+    if ret == -2
+        return nothing
+    elseif ret < 0
         error("Failed to parse HTTP headers (result = $ret)")
     end
 
-    return _parse_headers_to_dict(headers, Int(num_headers[]))
+    # The buffer 'buf' is passed down to create the views
+    return _parse_headers_to_vec(headers, Int(num_headers[]), buf)
 end
 
 """
-    parse_response(message::Union{AbstractString, AbstractVector{<:UInt8}}; max_headers::Integer = 64)
-
-    Parse an HTTP response string using picohttpparser.
-
-    Returns:
-        Response
+    parse_response(buf::Vector{UInt8}; max_headers=64)
 """
-function parse_response(message::Union{AbstractString,AbstractVector{<:UInt8}}; max_headers::Integer=64)
-    buf = message isa AbstractString ? codeunits(message) : message
-
+function parse_response(buf::Vector{UInt8}; max_headers::Integer=64)
     minor_ver = Ref{Cint}()
     status_code = Ref{Cint}()
-    msg_ptr, msg_len = Ref{Ptr{Cchar}}(), Ref{Csize_t}()
+    msg_ptr = Ref{Ptr{Cchar}}()
+    msg_len = Ref{Csize_t}()
 
     headers = Vector{Header}(undef, max_headers)
     num_headers = Ref{Csize_t}(max_headers)
@@ -156,19 +202,36 @@ function parse_response(message::Union{AbstractString,AbstractVector{<:UInt8}}; 
         pointer(headers), num_headers,
         0)
 
-    if ret < 0
+    if ret == -2
+        return nothing
+    elseif ret < 0
         error("Failed to parse HTTP response (result = $ret)")
     end
 
-    reason = unsafe_string(msg_ptr[], msg_len[])
-    headers_dict = _parse_headers_to_dict(headers, Int(num_headers[]))
+    reason = _ptr_to_view(buf, msg_ptr[], msg_len[])
+    headers_vec = _parse_headers_to_vec(headers, Int(num_headers[]), buf)
 
-    content_length = get(headers_dict, "Content-Length", "0")
-    body_len = parse(Int, content_length)
-    # Use body_len > 0 case?
-    body = buf[(ret+1):(ret+body_len)]
+    content_length = 0
+    for (k, v) in headers_vec
+        if length(k) == 14 && equals_insensitive(k, "content-length")
+            content_length = tryparse(Int, v)
+            if isnothing(content_length)
+                content_length = 0
+            end
+            break
+        end
+    end
 
-    return Response(status_code[], reason, minor_ver[], headers_dict, body)
+    body_start = ret + 1
+    body_end = ret + content_length
+
+    if length(buf) < body_end
+        return nothing
+    end
+
+    body = view(buf, body_start:body_end)
+
+    return Response(Int(status_code[]), reason, Int(minor_ver[]), headers_vec, body)
 end
 
 """
@@ -192,19 +255,17 @@ end
 
 struct ChunkedResult
     done::Bool
-    data::Vector{UInt8}
+    # We return a view because the data is IN PLACE in the buffer you passed.
+    data::SubArray{UInt8,1,Vector{UInt8},Tuple{UnitRange{Int}},true}
 end
 
 """
-    decode_chunked!(decoder::ChunkedDecoder, buf::Vector{UInt8}) -> ChunkedResult
+    decode_chunked!(decoder::ChunkedDecoder, buf::Vector{UInt8})
 
-    Feed a buffer of chunked-encoded data through picohttpparser's `phr_decode_chunked`.
-
-    Returns:
-        ChunkedResult
+    Decodes chunked data IN-PLACE within `buf`.
+    Returns `ChunkedResult`.
 """
-function decode_chunked!(decoder::ChunkedDecoder, message::Union{AbstractString,AbstractVector{<:UInt8}})
-    buf = message isa AbstractString ? codeunits(message) : message
+function decode_chunked!(decoder::ChunkedDecoder, buf::Vector{UInt8})
     buf_len = Ref{Csize_t}(length(buf))
 
     ret = ccall((:phr_decode_chunked, libpicohttpparser), Cssize_t,
@@ -212,14 +273,15 @@ function decode_chunked!(decoder::ChunkedDecoder, message::Union{AbstractString,
         Ref(decoder), pointer(buf), buf_len)
 
     if ret == -1
-        error("Failed to decode chunked data (result = $ret)")
-    elseif ret == -2
-        return ChunkedResult(false, UInt8[])
-    else
-        data = buf[1:buf_len[]]
-        done = (decoder.bytes_left_in_chunk == 0 && decoder.consume_trailer != 0) ? true : false
-        return ChunkedResult(done, data)
+        error("Failed to decode chunked data")
     end
+
+    final_len = Int(buf_len[])
+
+    # Check if we are truly done (0-length chunk + trailer consumed)
+    done = (decoder.bytes_left_in_chunk == 0 && decoder.consume_trailer != 0)
+
+    return ChunkedResult(done, view(buf, 1:final_len))
 end
 
 end
