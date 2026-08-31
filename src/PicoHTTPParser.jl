@@ -1,7 +1,7 @@
 module PicoHTTPParser
 
 using PicoHTTPParser_jll
-using StringViews
+using StringViews: StringView
 
 export parse_request, parse_response, parse_headers, get_header, ChunkedDecoder, decode_chunked!
 
