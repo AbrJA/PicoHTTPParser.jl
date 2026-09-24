@@ -249,6 +249,26 @@ using StringViews
         @test get_header(hb, buf, "user-agent") == "Julia"
     end
 
+    @testset "Request Head - survives buffer growth" begin
+        hb = HeaderBuffer(8)
+        raw = "POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\n"
+        buf = make_buf(raw)
+        @test parse_request_head!(hb, buf) === :done
+
+        # Growing/reallocating the buffer must not invalidate parsed views:
+        # they are offset-based, not absolute pointers.
+        append!(buf, make_buf("data"))
+        sizehint!(buf, 1_000_000)
+        resize!(buf, 1_000_000)
+
+        @test head_method(hb, buf) == "POST"
+        @test head_path(hb, buf) == "/upload"
+        @test head_header_len(hb) == findfirst("\r\n\r\n", raw)[1] + 3
+        @test get_header(hb, buf, "host") == "x"
+        @test get_header(hb, buf, "content-length") == "4"
+        @test header_count(hb) == 2
+    end
+
     @testset "Request Head - malformed" begin
         hb = HeaderBuffer(8)
         buf = make_buf("GET / HTTP/1.1\r\nNotAHeader\r\n\r\n")

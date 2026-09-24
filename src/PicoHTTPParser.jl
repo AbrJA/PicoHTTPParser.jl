@@ -186,9 +186,13 @@ mutable struct HeaderBuffer
     n::Int
     status::Symbol
     header_len::Int
-    method_ptr::Ptr{Cchar}
+    # Offsets relative to the buffer base at parse time. The input buffer may be
+    # appended to (and reallocated) between parsing the head and consuming it
+    # (streaming bodies), so absolute pointers would dangle.
+    base::Ptr{Cchar}
+    method_off::Int
     method_len::Csize_t
-    path_ptr::Ptr{Cchar}
+    path_off::Int
     path_len::Csize_t
     minor_version::Cint
 end
@@ -196,7 +200,12 @@ end
 function HeaderBuffer(max_headers::Integer=64)
     max_headers > 0 || throw(ArgumentError("max_headers must be positive"))
     return HeaderBuffer(Vector{Header}(undef, max_headers), 0, :none, 0,
-                        C_NULL, 0, C_NULL, 0, 0)
+                        C_NULL, 0, 0, 0, 0, 0)
+end
+
+@inline function _view_at(buf::Vector{UInt8}, base::Ptr{Cchar}, ptr::Ptr{Cchar}, len::Csize_t)::BufferView
+    offset = UInt(ptr) - UInt(base)
+    return _ptr_to_view(buf, Ptr{Cchar}(UInt(pointer(buf)) + offset), len)
 end
 
 """
@@ -250,12 +259,14 @@ function parse_request_head!(hb::HeaderBuffer, buf::Vector{UInt8}, last_len::Int
         return :error
     end
 
+    b = pointer(buf)
     hb.n = Int(num_headers[])
     hb.status = :done
     hb.header_len = Int(ret)
-    hb.method_ptr = method_ptr[]
+    hb.base = b
+    hb.method_off = Int(UInt(method_ptr[]) - UInt(b))
     hb.method_len = method_len[]
-    hb.path_ptr = path_ptr[]
+    hb.path_off = Int(UInt(path_ptr[]) - UInt(b))
     hb.path_len = path_len[]
     hb.minor_version = minor_version[]
     return :done
@@ -272,11 +283,11 @@ head_minor_version(hb::HeaderBuffer)::Int = Int(hb.minor_version)
 
 """Request method as a view into `buf` (valid when `is_done(hb)`)."""
 @inline head_method(hb::HeaderBuffer, buf::Vector{UInt8})::BufferView =
-    _ptr_to_view(buf, hb.method_ptr, hb.method_len)
+    _ptr_to_view(buf, Ptr{Cchar}(UInt(pointer(buf)) + hb.method_off), hb.method_len)
 
 """Request path as a view into `buf` (valid when `is_done(hb)`)."""
 @inline head_path(hb::HeaderBuffer, buf::Vector{UInt8})::BufferView =
-    _ptr_to_view(buf, hb.path_ptr, hb.path_len)
+    _ptr_to_view(buf, Ptr{Cchar}(UInt(pointer(buf)) + hb.path_off), hb.path_len)
 
 """Number of headers parsed into `hb` by the last [`parse_request_head!`](@ref)."""
 header_count(hb::HeaderBuffer)::Int = hb.n
@@ -284,13 +295,13 @@ header_count(hb::HeaderBuffer)::Int = hb.n
 """Name of header `i` as a view into `buf` (1-based)."""
 @inline function header_name(hb::HeaderBuffer, i::Integer, buf::Vector{UInt8})::BufferView
     h = @inbounds hb.raw[i]
-    return _ptr_to_view(buf, h.name, h.name_len)
+    return _view_at(buf, hb.base, h.name, h.name_len)
 end
 
 """Value of header `i` as a view into `buf` (1-based)."""
 @inline function header_value(hb::HeaderBuffer, i::Integer, buf::Vector{UInt8})::BufferView
     h = @inbounds hb.raw[i]
-    return _ptr_to_view(buf, h.value, h.value_len)
+    return _view_at(buf, hb.base, h.value, h.value_len)
 end
 
 """
