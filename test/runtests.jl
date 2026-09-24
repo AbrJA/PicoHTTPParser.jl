@@ -164,43 +164,124 @@ using StringViews
         # decode_chunked! modifies 'buf' in-place!
         result = decode_chunked!(decoder, buf)
 
-        @test result.done == true
-        @test String(result.data) == "Wiki"
+        @test is_done(result)
+        @test result.status === :done
+        @test result.leftover == 0
+        @test String(decoded_data(result, buf)) == "Wiki"
 
-        # Verify buffer modification (optional check)
-        # The parser typically moves bytes to the front.
-        # The first 4 bytes of buf should now be "Wiki".
+        # The decoded data is compacted to the front of the buffer.
         @test String(buf[1:4]) == "Wiki"
     end
 
     @testset "Chunked Decoding - Fragmented" begin
-        # Simulate receiving chunks in two parts
-        # Part 1: "4\r\nWi"
-        # Part 2: "ki\r\n0\r\n\r\n"
-
+        # Simulate receiving chunks in two parts:
+        # Part 1: "4\r\nWi"   → 2 decoded bytes, chunk still open
+        # Part 2: "ki\r\n0\r\n\r\n" → completes the message
         decoder = ChunkedDecoder()
 
-        # --- Part 1 ---
         buf1 = make_buf("4\r\nWi")
         res1 = decode_chunked!(decoder, buf1)
+        @test res1.status === :partial
+        @test String(decoded_data(res1, buf1)) == "Wi"
 
-        @test res1.done == false
-        @test String(res1.data) == "Wi" # It decoded the available bytes
-
-        # --- Part 2 ---
-        # Note: In a real server, you handle the state.
-        # Here we just feed the next buffer.
         buf2 = make_buf("ki\r\n0\r\n\r\n")
-
-        # We need to tell the decoder we are continuing?
-        # PicoHTTPParser stores state in `decoder.bytes_left_in_chunk`
-
         res2 = decode_chunked!(decoder, buf2)
+        @test is_done(res2)
+        @test String(decoded_data(res2, buf2)) == "ki"
+    end
 
-        @test res2.done == true
-        @test String(res2.data) == "ki"
+    @testset "Chunked Decoding - Leftover (pipelining)" begin
+        # Bytes that follow the terminal chunk are reported as leftover.
+        trailer = "GET /next HTTP/1.1\r\n\r\n"
+        buf = make_buf("4\r\nWiki\r\n0\r\n\r\n" * trailer)
+        result = decode_chunked!(ChunkedDecoder(), buf)
 
-        # Total data would be concatenation of res1.data and res2.data
+        @test is_done(result)
+        @test String(decoded_data(result, buf)) == "Wiki"
+        @test result.leftover == length(trailer)
+        @test String(leftover_data(result, buf)) == trailer
+    end
+
+    @testset "Chunked Decoding - Error" begin
+        buf = make_buf("Z\r\nWiki\r\n0\r\n\r\n")   # 'Z' is not a hex chunk size
+        result = decode_chunked!(ChunkedDecoder(), buf)
+        @test result.status === :error
+    end
+
+    @testset "Request Head - allocation-free API" begin
+        raw = "POST /submit HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\nHello"
+        buf = make_buf(raw)
+        hb = HeaderBuffer(16)
+
+        @test parse_request_head!(hb, buf) === :done
+        @test is_done(hb)
+        @test head_method(hb, buf) == "POST"
+        @test head_path(hb, buf) == "/submit"
+        @test head_minor_version(hb) == 1
+        @test head_header_len(hb) == findfirst("\r\n\r\n", raw)[1] + 3
+        @test header_count(hb) == 2
+        @test header_name(hb, 1, buf) == "Host"
+        @test header_value(hb, 1, buf) == "example.com"
+        @test get_header(hb, buf, "content-length") == "5"
+        @test get_header(hb, buf, "CONTENT-LENGTH") == "5"
+        @test get_header(hb, buf, "missing") === nothing
+
+        pairs = header_pairs(hb, buf)
+        @test length(pairs) == 2
+        @test pairs[2].first == "Content-Length"
+        @test pairs[2].second == "5"
+    end
+
+    @testset "Request Head - incremental with last_len" begin
+        hb = HeaderBuffer(8)
+        buf = Vector{UInt8}("GET /async HTTP/1.1\r\nUser-A")
+        first_len = length(buf)
+
+        @test parse_request_head!(hb, buf, 0) === :partial
+        @test !is_done(hb)
+        @test header_count(hb) == 0
+
+        append!(buf, Vector{UInt8}("gent: Julia\r\n\r\n"))
+        @test parse_request_head!(hb, buf, first_len) === :done
+        @test head_method(hb, buf) == "GET"
+        @test head_path(hb, buf) == "/async"
+        @test head_header_len(hb) == length(buf)
+        @test get_header(hb, buf, "user-agent") == "Julia"
+    end
+
+    @testset "Request Head - malformed" begin
+        hb = HeaderBuffer(8)
+        buf = make_buf("GET / HTTP/1.1\r\nNotAHeader\r\n\r\n")
+        @test parse_request_head!(hb, buf) === :error
+        @test !is_done(hb)
+        @test header_count(hb) == 0
+    end
+
+    @testset "Request Head - steady-state zero allocation" begin
+        hb = HeaderBuffer(16)
+        buf = make_buf("GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        parse_request_head!(hb, buf)   # warmup
+
+        @test (@allocated parse_request_head!(hb, buf)) == 0
+        @test (@allocated head_method(hb, buf)) == 0
+
+        # Views consumed in place must not allocate either.
+        function _sum_header_bytes(hb, buf)
+            n = 0
+            for i in 1:header_count(hb)
+                n += ncodeunits(header_name(hb, i, buf))
+                n += ncodeunits(header_value(hb, i, buf))
+            end
+            return n
+        end
+        function _header_len(hb, buf, key)
+            v = get_header(hb, buf, key)
+            return v === nothing ? 0 : ncodeunits(v)
+        end
+        _sum_header_bytes(hb, buf)   # warmup
+        _header_len(hb, buf, "host")
+        @test (@allocated _sum_header_bytes(hb, buf)) == 0
+        @test (@allocated _header_len(hb, buf, "host")) == 0
     end
 
     @testset "Zero-Copy Safety (GC Pressure)" begin

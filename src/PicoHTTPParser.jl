@@ -3,7 +3,11 @@ module PicoHTTPParser
 using PicoHTTPParser_jll
 using StringViews
 
-export parse_request, parse_response, parse_headers, get_header, ChunkedDecoder, decode_chunked!
+export parse_request, parse_response, parse_headers, get_header,
+       HeaderBuffer, parse_request_head!, is_done, head_header_len,
+       head_minor_version, head_method, head_path,
+       header_count, header_name, header_value, header_pairs,
+       ChunkedDecoder, decode_chunked!, decoded_data, leftover_data
 
 abstract type HTTPMessage end
 
@@ -148,8 +152,168 @@ function get_header(msg::HTTPMessage, key::AbstractString)
     return nothing
 end
 
+"""
+    equals_insensitive(a, b) -> Bool
+
+Allocation-free ASCII case-insensitive comparison. HTTP tokens and header names
+are ASCII by definition; non-ASCII bytes compare exactly.
+"""
 function equals_insensitive(a::AbstractString, b::AbstractString)
-    return length(a) == length(b) && all(lowercase(c1) == lowercase(c2) for (c1, c2) in zip(a, b))
+    ncodeunits(a) == ncodeunits(b) || return false
+    @inbounds for i in 1:ncodeunits(b)
+        ca = codeunit(a, i)
+        cb = codeunit(b, i)
+        ca_lower = UInt8('A') <= ca <= UInt8('Z') ? ca | 0x20 : ca
+        cb_lower = UInt8('A') <= cb <= UInt8('Z') ? cb | 0x20 : cb
+        ca_lower == cb_lower || return false
+    end
+    return true
+end
+
+# ── Allocation-free incremental request-head parsing ────────────────────────
+
+"""
+    HeaderBuffer([max_headers::Integer=64])
+
+Caller-owned scratch space for [`parse_request_head!`](@ref). Reuse one per
+worker thread (parsing is synchronous; a `HeaderBuffer` is not thread-safe).
+
+Header names and values are exposed lazily as views into the input buffer, so
+that buffer must stay alive and unmodified until the parsed result is consumed.
+"""
+mutable struct HeaderBuffer
+    raw::Vector{Header}
+    n::Int
+    status::Symbol
+    header_len::Int
+    method_ptr::Ptr{Cchar}
+    method_len::Csize_t
+    path_ptr::Ptr{Cchar}
+    path_len::Csize_t
+    minor_version::Cint
+end
+
+function HeaderBuffer(max_headers::Integer=64)
+    max_headers > 0 || throw(ArgumentError("max_headers must be positive"))
+    return HeaderBuffer(Vector{Header}(undef, max_headers), 0, :none, 0,
+                        C_NULL, 0, C_NULL, 0, 0)
+end
+
+"""
+    parse_request_head!(hb::HeaderBuffer, buf::Vector{UInt8}, last_len::Integer=0) -> Symbol
+
+Parse only the request line and headers; the body is never touched (body
+framing is the caller's responsibility). Returns `:partial` when the header
+block is incomplete, `:error` when the request is malformed or has more than
+`length(hb.raw)` headers, and `:done` when the full head is present.
+
+The result is stored in `hb` and nothing is allocated: after `:done`, use
+[`head_method`](@ref), [`head_path`](@ref), [`head_header_len`](@ref) and
+[`head_minor_version`](@ref).
+
+`last_len` is the number of bytes already scanned in a previous call, so
+incremental callers do not rescan the buffer prefix.
+
+Returned views point into `buf`; keep it alive and unmodified until consumed.
+"""
+function parse_request_head!(hb::HeaderBuffer, buf::Vector{UInt8}, last_len::Integer=0)::Symbol
+    # Locals (not fields): ccall can elide stack refs that never escape.
+    raw = hb.raw
+    method_ptr = Ref{Ptr{Cchar}}(C_NULL)
+    method_len = Ref{Csize_t}(0)
+    path_ptr = Ref{Ptr{Cchar}}(C_NULL)
+    path_len = Ref{Csize_t}(0)
+    minor_version = Ref{Cint}(0)
+    num_headers = Ref{Csize_t}(length(raw))
+
+    ret = GC.@preserve buf raw ccall((:phr_parse_request, libpicohttpparser), Cint,
+        (Ptr{Cchar}, Csize_t,
+         Ref{Ptr{Cchar}}, Ref{Csize_t},
+         Ref{Ptr{Cchar}}, Ref{Csize_t},
+         Ref{Cint}, Ptr{Header}, Ref{Csize_t}, Csize_t),
+        pointer(buf), length(buf),
+        method_ptr, method_len,
+        path_ptr, path_len,
+        minor_version,
+        pointer(raw), num_headers,
+        last_len)
+
+    if ret == -2
+        hb.n = 0
+        hb.status = :partial
+        hb.header_len = 0
+        return :partial
+    elseif ret < 0
+        hb.n = 0
+        hb.status = :error
+        hb.header_len = 0
+        return :error
+    end
+
+    hb.n = Int(num_headers[])
+    hb.status = :done
+    hb.header_len = Int(ret)
+    hb.method_ptr = method_ptr[]
+    hb.method_len = method_len[]
+    hb.path_ptr = path_ptr[]
+    hb.path_len = path_len[]
+    hb.minor_version = minor_version[]
+    return :done
+end
+
+"""Whether the last [`parse_request_head!`](@ref) call completed the header block."""
+is_done(hb::HeaderBuffer)::Bool = hb.status === :done
+
+"""Bytes occupied by the request head (0 unless the last parse returned `:done`)."""
+head_header_len(hb::HeaderBuffer)::Int = hb.header_len
+
+"""HTTP minor version of the parsed request (valid when `is_done(hb)`)."""
+head_minor_version(hb::HeaderBuffer)::Int = Int(hb.minor_version)
+
+"""Request method as a view into `buf` (valid when `is_done(hb)`)."""
+@inline head_method(hb::HeaderBuffer, buf::Vector{UInt8})::BufferView =
+    _ptr_to_view(buf, hb.method_ptr, hb.method_len)
+
+"""Request path as a view into `buf` (valid when `is_done(hb)`)."""
+@inline head_path(hb::HeaderBuffer, buf::Vector{UInt8})::BufferView =
+    _ptr_to_view(buf, hb.path_ptr, hb.path_len)
+
+"""Number of headers parsed into `hb` by the last [`parse_request_head!`](@ref)."""
+header_count(hb::HeaderBuffer)::Int = hb.n
+
+"""Name of header `i` as a view into `buf` (1-based)."""
+@inline function header_name(hb::HeaderBuffer, i::Integer, buf::Vector{UInt8})::BufferView
+    h = @inbounds hb.raw[i]
+    return _ptr_to_view(buf, h.name, h.name_len)
+end
+
+"""Value of header `i` as a view into `buf` (1-based)."""
+@inline function header_value(hb::HeaderBuffer, i::Integer, buf::Vector{UInt8})::BufferView
+    h = @inbounds hb.raw[i]
+    return _ptr_to_view(buf, h.value, h.value_len)
+end
+
+"""
+    get_header(hb::HeaderBuffer, buf, key) -> Union{BufferView, Nothing}
+
+Case-insensitive header lookup without materializing the header list.
+"""
+@inline function get_header(hb::HeaderBuffer, buf::Vector{UInt8}, key::AbstractString)
+    for i in 1:hb.n
+        if equals_insensitive(header_name(hb, i, buf), key)
+            return header_value(hb, i, buf)
+        end
+    end
+    return nothing
+end
+
+"""Materialize all parsed headers as `Vector{Pair{BufferView,BufferView}}` (allocating)."""
+function header_pairs(hb::HeaderBuffer, buf::Vector{UInt8})::Vector{Pair{BufferView,BufferView}}
+    res = Vector{Pair{BufferView,BufferView}}(undef, hb.n)
+    @inbounds for i in 1:hb.n
+        res[i] = header_name(hb, i, buf) => header_value(hb, i, buf)
+    end
+    return res
 end
 
 """
@@ -237,8 +401,8 @@ end
 """
     ChunkedDecoder(; consume_trailer::Bool = true)
 
-    Returns:
-        ChunkedDecoder
+Stateful chunked-transfer decoder. Zero-fill once and reuse across
+`decode_chunked!` calls; keep one decoder per connection.
 """
 mutable struct ChunkedDecoder
     bytes_left_in_chunk::Csize_t
@@ -253,35 +417,54 @@ mutable struct ChunkedDecoder
     end
 end
 
+"""
+    ChunkedResult
+
+Outcome of [`decode_chunked!`](@ref):
+
+- `status`: `:partial` (more input required), `:done` (terminal chunk reached),
+  or `:error`.
+- `decoded_len`: length of the decoded data at the front of the input buffer.
+- `leftover`: undecoded bytes following the decoded data; only meaningful when
+  `status === :done` (for example a pipelined next request).
+"""
 struct ChunkedResult
-    done::Bool
-    # We return a view because the data is IN PLACE in the buffer you passed.
-    data::SubArray{UInt8,1,Vector{UInt8},Tuple{UnitRange{Int}},true}
+    status::Symbol
+    decoded_len::Int
+    leftover::Int
 end
 
-"""
-    decode_chunked!(decoder::ChunkedDecoder, buf::Vector{UInt8})
+is_done(r::ChunkedResult)::Bool = r.status === :done
 
-    Decodes chunked data IN-PLACE within `buf`.
-    Returns `ChunkedResult`.
-"""
-function decode_chunked!(decoder::ChunkedDecoder, buf::Vector{UInt8})
-    buf_len = Ref{Csize_t}(length(buf))
+"""View of the decoded data (`1:decoded_len`) inside the in-place buffer."""
+decoded_data(r::ChunkedResult, buf::Vector{UInt8}) = view(buf, 1:r.decoded_len)
 
-    ret = ccall((:phr_decode_chunked, libpicohttpparser), Cssize_t,
+"""View of the leftover bytes after the decoded data; valid when `is_done(r)`."""
+leftover_data(r::ChunkedResult, buf::Vector{UInt8}) =
+    view(buf, r.decoded_len + 1:r.decoded_len + r.leftover)
+
+"""
+    decode_chunked!(decoder::ChunkedDecoder, buf::Vector{UInt8}) -> ChunkedResult
+
+Decode chunked data **in place**. `buf` must contain newly arrived, still-encoded
+bytes starting at a chunk boundary or at a mid-chunk continuation; decoded bytes
+are compacted to the front of `buf`. On `:done`, any bytes after the chunked
+message (for example a pipelined next request) are moved directly after the
+decoded data and reported as `leftover`. Hand the decoder a fresh buffer for the
+next message.
+"""
+function decode_chunked!(decoder::ChunkedDecoder, buf::Vector{UInt8})::ChunkedResult
+    bufsz = Ref{Csize_t}(length(buf))
+    ret = GC.@preserve decoder buf ccall((:phr_decode_chunked, libpicohttpparser), Cssize_t,
         (Ref{ChunkedDecoder}, Ptr{Cchar}, Ref{Csize_t}),
-        Ref(decoder), pointer(buf), buf_len)
-
+        decoder, pointer(buf), bufsz)
+    decoded_len = Int(bufsz[])
     if ret == -1
-        error("Failed to decode chunked data")
+        return ChunkedResult(:error, 0, 0)
+    elseif ret == -2
+        return ChunkedResult(:partial, decoded_len, 0)
     end
-
-    final_len = Int(buf_len[])
-
-    # Check if we are truly done (0-length chunk + trailer consumed)
-    done = (decoder.bytes_left_in_chunk == 0 && decoder.consume_trailer != 0)
-
-    return ChunkedResult(done, view(buf, 1:final_len))
+    return ChunkedResult(:done, decoded_len, Int(ret))
 end
 
 end
