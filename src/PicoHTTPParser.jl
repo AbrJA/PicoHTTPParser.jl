@@ -21,8 +21,10 @@ abstract type HTTPMessage end
     HTTPParseError
 
 Thrown by [`parse_request`](@ref), [`parse_response`](@ref), and
-[`parse_headers`](@ref) when the input is malformed. The `result` field holds
-the raw return code from the underlying picohttpparser call.
+[`parse_headers`](@ref) when the input is malformed, and by
+[`content_length`](@ref) for invalid or duplicate `Content-Length` fields. The
+`result` field holds the raw return code from the underlying picohttpparser
+call (`-1` for framing errors detected in Julia).
 """
 struct HTTPParseError <: Exception
     result::Int
@@ -96,7 +98,8 @@ thread (parsing is synchronous; a `HeaderBuffer` is not thread-safe).
 
 The last parse result is stored in the buffer and exposed through accessors
 (`request_method`, `request_target`, `status_code`, `reason_phrase`,
-`head_length`, `minor_version`, `length`, `header`, `headers`).
+`head_length`, `minor_version`, `length`, `header`, `headers`,
+`content_length`).
 
 Header names and values are exposed lazily as views into the input buffer, so
 that buffer must stay alive. Views are resolved by offset, so the buffer may be
@@ -192,7 +195,7 @@ incomplete, `:error` when the request is malformed or has more than
 Nothing is allocated: the result lives in `hb`. After `:done`, use
 [`request_method`](@ref), [`request_target`](@ref), [`head_length`](@ref),
 [`minor_version`](@ref), `length(hb)`, `hb[i, buf]`, [`header`](@ref), and
-[`headers`](@ref).
+[`headers`](@ref); [`content_length`](@ref) gives the validated framing length.
 
 `prev_len` is the number of bytes already scanned in a previous call, so
 incremental callers do not rescan the buffer prefix.
@@ -609,7 +612,7 @@ parse_headers(buf::Vector{UInt8}, prev_len::Integer=0; max_headers::Integer=64) 
 """
     ChunkedDecoder(; consume_trailer::Bool = true)
 
-Stateful chunked-transfer decoder. Zero-fill once and reuse across
+Stateful chunked-transfer decoder. Construct once and reuse across
 `decode_chunked!` calls; keep one decoder per connection.
 """
 mutable struct ChunkedDecoder

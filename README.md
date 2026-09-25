@@ -10,7 +10,10 @@ This package provides extremely fast HTTP parsing by using **zero-copy `StringVi
 ## 🚀 Features
 
 - **Zero-Copy Parsing**: Uses `StringViews.jl` to return views into your buffer.
-- **Streaming / Incremental Support**: Parse requests as they arrive in chunks without rescanning.
+- **Streaming / Incremental Support**: Parse messages as they arrive in chunks without rescanning.
+- **Zero-Allocation Heads**: Reusable `HeaderBuffer` scratch space for steady-state parsing.
+- **Requests, Responses & Trailers**: The same machinery covers request heads, response heads, and standalone field sections.
+- **Strict Framing**: `Content-Length` is validated as `1*DIGIT`; duplicates and `Transfer-Encoding` are rejected (request-smuggling defense).
 - **Chunked Transfer Decoding**: High-performance in-place chunked decoding.
 - **Battle-Tested Backend**: Bindings to the widely used `picohttpparser` C library.
 
@@ -122,14 +125,39 @@ end
 
 Body framing (Content-Length / chunked) is the caller's responsibility; the head
 parser never touches body bytes. Use `prev_len` to avoid rescanning a prefix that
-was already known incomplete.
+was already known incomplete. `content_length(hb, buf)` reads the validated
+`Content-Length`: `nothing` when absent, otherwise the value, and `HTTPParseError`
+on duplicates or values that are not `1*DIGIT`.
 
-The same pattern covers responses and standalone field sections:
-`parse_response_head!` (with `status_code` / `reason_phrase`) and `parse_headers!`
-(for trailers). The whole-message `parse_request`, `parse_response`, and
-`parse_headers` are convenience wrappers built on the same offset-safe machinery:
-they return `nothing` for partial input and throw `HTTPParseError` for malformed
-input.
+Obsolete line folding (obs-fold) surfaces as a header with an empty name; either
+reject it or merge `hb[i, buf]` with the previous value.
+
+### Responses and Field Sections
+
+`parse_response_head!` and `parse_headers!` reuse the same scratch space and
+offset-safe views:
+
+```julia
+using PicoHTTPParser
+using PicoHTTPParser: header
+
+hb = HeaderBuffer(64)
+
+resp = Vector{UInt8}("HTTP/1.1 204 No Content\r\nServer: Pico\r\n\r\n")
+@show parse_response_head!(hb, resp)  # :done
+@show status_code(hb)                 # 204
+@show reason_phrase(hb, resp)         # "No Content"
+
+trailer = Vector{UInt8}("Expires: Wed, 21 Oct 2026 07:28:00 GMT\r\n\r\n")
+@show parse_headers!(hb, trailer)     # :done (standalone field section)
+@show header(hb, trailer, "expires")
+```
+
+The whole-message `parse_request`, `parse_response`, and `parse_headers` are
+convenience wrappers built on the same machinery: they return `nothing` for
+partial input and throw `HTTPParseError` for malformed input. Accessors validate
+the last parse, so mixing them up (for example `status_code` after a request
+head) throws `ArgumentError`.
 
 ### Chunked Transfer Decoding
 
