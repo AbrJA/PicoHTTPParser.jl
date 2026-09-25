@@ -1,6 +1,6 @@
 using Test
 using PicoHTTPParser
-using StringViews
+using StringViews: StringView
 
 @testset "PicoHTTPParser Tests" begin
 
