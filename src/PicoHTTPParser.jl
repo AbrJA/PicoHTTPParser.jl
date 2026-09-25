@@ -1,7 +1,9 @@
 module PicoHTTPParser
 
 using PicoHTTPParser_jll
-using StringViews
+# Explicit import: Base started exporting `StringView` (Julia 1.14 nightly),
+# which would make the unqualified name ambiguous with `using StringViews`.
+import StringViews: StringView
 
 # NOTE: `header` and `headers` are intentionally not exported: they are generic
 # names that collide with framework APIs (for example Ciro.header). Use them
