@@ -1,7 +1,7 @@
 using Test
 using PicoHTTPParser
 using PicoHTTPParser: header, headers   # intentionally not exported (generic names)
-using StringViews
+using StringViews: StringView
 
 @testset "PicoHTTPParser Tests" begin
 
