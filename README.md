@@ -24,6 +24,9 @@ pkg> add PicoHTTPParser
 
 ```julia
 using PicoHTTPParser
+
+# `header` and `headers` are generic names, so they are not exported; opt in:
+using PicoHTTPParser: header, headers
 ```
 
 ### Basic Request Parsing
@@ -39,19 +42,28 @@ User-Agent: Julia\r
 """ |> Vector{UInt8}
 
 # Parse the request
-# parse_request(buf, last_len; max_headers)
+# parse_request(buf, prev_len; max_headers)
 req = parse_request(data)
 
 @show req.method        # "GET" (StringView)
-@show req.path          # "/index.html"
+@show req.target        # "/index.html" (request-target, may include the query)
 @show req.minor_version # 1
 @show req.headers       # Vector{Pair{StringView, StringView}}
 @show req.body          # SubArray (View of the body)
+
+@show header(req, "Host")  # "example.com"
 ```
+
+> **Body framing**: the whole-message API frames bodies with `Content-Length`
+> only. A request without it gets an empty body, and `Transfer-Encoding` is
+> rejected with `ArgumentError` (use `parse_request_head!` + `decode_chunked!`
+> for chunked bodies). Duplicate or invalid `Content-Length` throws
+> `HTTPParseError`. For responses, 1xx/204/304 are treated as bodyless;
+> responses to HEAD cannot be detected here.
 
 ### Streaming / Incremental Parsing
 
-If you receive data in chunks (e.g., disjoint TCP reads), you can use the `last_len` parameter to tell the parser where you left off. This prevents rescanning bytes that were already confirmed to be part of an incomplete header section.
+If you receive data in chunks (e.g., disjoint TCP reads), you can use the `prev_len` parameter to tell the parser where you left off. This prevents rescanning bytes that were already confirmed to be part of an incomplete header section.
 
 ```julia
 # 1. Initialize a buffer
@@ -77,7 +89,7 @@ append!(buf, Vector{UInt8}(part2))
 req = parse_request(buf, prev_len)
 
 if req !== nothing
-    println("Parsed: $(req.method) $(req.path)")
+    println("Parsed: $(req.method) $(req.target)")
 end
 ```
 
@@ -85,30 +97,39 @@ end
 
 For servers, `parse_request_head!` parses only the request line and headers with
 caller-owned scratch space, so steady-state parsing performs **zero allocations**.
-It reports `:partial` / `:done` / `:error`, supports `last_len` incremental
-scanning, and exposes headers lazily as views.
+It reports `:partial` / `:done` / `:error` (check with `ispartial`, `isdone`,
+`iserror`), supports `prev_len` incremental scanning, and exposes headers lazily
+as views.
 
 ```julia
 using PicoHTTPParser
+using PicoHTTPParser: header
 
 hb = HeaderBuffer(64)          # reuse one per worker thread
 buf = Vector{UInt8}("GET /items/42 HTTP/1.1\r\nHost: example.com\r\n\r\n")
 
 @show parse_request_head!(hb, buf)   # :done
-@show is_done(hb)                    # true
-@show head_method(hb, buf)           # "GET"
-@show head_path(hb, buf)             # "/items/42"
-@show head_header_len(hb)            # header block length
-@show get_header(hb, buf, "host")    # "example.com"
+@show isdone(hb)                     # true
+@show request_method(hb, buf)        # "GET"
+@show request_target(hb, buf)        # "/items/42"
+@show head_length(hb)                # header block length
+@show header(hb, buf, "host")        # "example.com"
 
-for i in 1:header_count(hb)
-    @show header_name(hb, i, buf) => header_value(hb, i, buf)
+for i in 1:length(hb)
+    @show hb[i, buf]                 # "name" => "value" pair of views
 end
 ```
 
 Body framing (Content-Length / chunked) is the caller's responsibility; the head
-parser never touches body bytes. Use `last_len` to avoid rescanning a prefix that
+parser never touches body bytes. Use `prev_len` to avoid rescanning a prefix that
 was already known incomplete.
+
+The same pattern covers responses and standalone field sections:
+`parse_response_head!` (with `status_code` / `reason_phrase`) and `parse_headers!`
+(for trailers). The whole-message `parse_request`, `parse_response`, and
+`parse_headers` are convenience wrappers built on the same offset-safe machinery:
+they return `nothing` for partial input and throw `HTTPParseError` for malformed
+input.
 
 ### Chunked Transfer Decoding
 
@@ -125,16 +146,16 @@ decoder = ChunkedDecoder()
 # Modifies 'raw_chunked' in-place!
 result = decode_chunked!(decoder, raw_chunked)
 
-@show is_done(result)                             # true
-@show String(decoded_data(result, raw_chunked))   # "Wiki"
-@show result.leftover                             # 0
+@show isdone(result)                            # true
+@show String(decoded(result, raw_chunked))      # "Wiki"
+@show result.leftover                           # 0
 ```
 
-For fragmented input, call `decode_chunked!` again with the newly arrived bytes;
-the decoder keeps the framing state. When `is_done(result)`, hand the decoder a
-fresh buffer for the next message. Bytes after the terminal chunk are reported as
-`leftover` (accessible with `leftover_data(result, buf)`), which enables
-pipelining.
+For fragmented input, call `decode_chunked!` again with the newly arrived bytes
+(check `ispartial(result)`); the decoder keeps the framing state. When
+`isdone(result)`, hand the decoder a fresh buffer for the next message. Bytes
+after the terminal chunk are reported as `leftover` (accessible with
+`leftover(result, buf)`), which enables pipelining.
 
 ## ⚙️ Contributing
 
