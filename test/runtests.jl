@@ -510,9 +510,15 @@ using StringViews
         parse_request_head!(hb, buf)   # warmup
 
         @test (@allocated parse_request_head!(hb, buf)) == 0
-        @test (@allocated request_method(hb, buf)) == 0
 
-        # Views consumed in place must not allocate either.
+        # Views consumed in place must not allocate either. The helpers return
+        # `Int`: measuring a bare `request_method` call at testset scope is
+        # dynamically dispatched (the `@allocated` block is force-compiled while
+        # the enclosing locals are interpreted), so its `BufferView` result is
+        # heap-boxed and counted even though the parser itself allocates nothing.
+        function _method_len(hb, buf)
+            return ncodeunits(request_method(hb, buf))
+        end
         function _sum_header_bytes(hb, buf)
             n = 0
             for i in 1:length(hb)
@@ -525,8 +531,10 @@ using StringViews
             v = header(hb, buf, key)
             return v === nothing ? 0 : ncodeunits(v)
         end
-        _sum_header_bytes(hb, buf)   # warmup
+        _method_len(hb, buf)         # warmup
+        _sum_header_bytes(hb, buf)
         _header_len(hb, buf, "host")
+        @test (@allocated _method_len(hb, buf)) == 0
         @test (@allocated _sum_header_bytes(hb, buf)) == 0
         @test (@allocated _header_len(hb, buf, "host")) == 0
     end
